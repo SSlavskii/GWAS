@@ -1,6 +1,14 @@
+import pandas as pd
+import argparse
 
-snp1 = 12740374
-snp2 = 602633
+def get_query_table():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", "--input")
+    results = parser.parse_args()
+    return results.input
 
-output = "%s dfsdfsdf %s" %(snp1 ,snp2)
-print(output)
+if __name__=="__main__":
+    input_path = get_query_table()
+    query_table = pd.read_table(input_path, header=None, sep='\t')
+    sr_pairs = [data.tolist() for index, data in query_table.iterrows()]
+    print(sr_pairs)
