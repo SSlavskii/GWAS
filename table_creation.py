@@ -3,6 +3,7 @@ import subprocess
 import os
 import pandas as pd
 import argparse
+from scipy import stats
 
 CLICKHOUSE_CONNECTION_PARAMS = {'host': 'http://localhost:8123', 'database': 'gwas'}
 plink_path = '/home/ubuntu/gwas/old_gwas/tools/plink/plink'
@@ -26,32 +27,33 @@ class SNP:
         self.bp = df['bp'].item()
 
     def get_snp_info(self, sr_id):
-        query = "select chrom, snp_id, ea, ra, bp from {0}.{1} where snp_num=={2}  limit 1".\
+        query = "select chrom, snp_id, ea, ra, bp from {0}.{1} where snp_num=={2}  and  outlier=0  limit 1".\
             format(CLICK_DB, CLICK_TABLE, sr_id)
         print(query)
         row = ph.read_clickhouse(query, connection=CLICKHOUSE_CONNECTION_PARAMS)
         return row
 
-    def get_list(self):
-        return [self.id, self.bp, self.ra, self.ea]
-
 
 def get_z_correlation(rs_id1, rs_id2):
-    query = "SELECT corr(z_1, z_2)\
+    query = "SELECT z_1, z_2  \
        FROM (\
             SELECT gwas_1.gwas_id, gwas_1.z AS z_1\
             FROM {0}.{1} as gwas_1\
-            WHERE gwas_1.snp_num = {2}\
+            WHERE gwas_1.snp_num = {2} and  outlier=0 \
         ) ALL INNER JOIN (\
             SELECT gwas_2.gwas_id, gwas_2.z AS z_2\
             FROM {0}.{1} as gwas_2\
-            WHERE gwas_2.snp_num = {3}\
+            WHERE gwas_2.snp_num = {3} and  outlier=0 \
         ) USING gwas_id".format(CLICK_DB, CLICK_TABLE, rs_id1, rs_id2)
-    z_corr = ph.read_clickhouse(query, connection=CLICKHOUSE_CONNECTION_PARAMS)
-    return z_corr['corr(z_1, z_2)'].item()
 
+    z_df = ph.read_clickhouse(query, connection=CLICKHOUSE_CONNECTION_PARAMS)
+    z_df_filtered = z_df.loc[(abs(z_df['z_1']) < 2) & (abs(z_df['z_2']) < 2)]
 
+    z_corr_spearman = stats.spearmanr(z_df['z_1'], z_df['z_2']).correlation
+    z_corr_less_than_2 = stats.pearsonr(z_df_filtered['z_1'], z_df_filtered['z_2'])[0]
+    z_corr_ordinary = stats.pearsonr(z_df['z_1'], z_df['z_2'])[0]
 
+    return [z_corr_ordinary, z_corr_less_than_2, z_corr_spearman]
 
 
 def get_plink_output(snp1, snp2, chr):
@@ -78,17 +80,17 @@ def get_plink_output(snp1, snp2, chr):
     ld_table['EAF_A'] = freq_table[freq_table['SNP'] == ld_table['SNP_A'].item()]['MAF'].item()
     ld_table['EAF_B'] = freq_table[freq_table['SNP'] == ld_table['SNP_B'].item()]['MAF'].item()
 
-    #os.remove(out_file_prefix + '.ld')
-    #os.remove(out_file_prefix + '.frq')
+    os.remove(out_file_prefix + '.ld')
+    os.remove(out_file_prefix + '.frq')
     os.remove(out_file_prefix + '.log')
     os.remove(out_file_prefix + '.nosex')
     return ld_table
 
 
-def generate_list_for_2_snp(snp1, snp2):
+def generate_df_for_snp_pair(snp1, snp2):
     first_snp = SNP(snp1)
     second_snp = SNP(snp2)
-    z_corr = get_z_correlation(snp1, snp2)
+    list_of_z_corr = get_z_correlation(snp1, snp2)
     dist = abs(first_snp.bp - second_snp.bp)
     plink_info = get_plink_output(snp1, snp2, first_snp.chr)  # this is dataframe
     plink_info['dist'] = dist
@@ -98,7 +100,10 @@ def generate_list_for_2_snp(snp1, snp2):
         first_snp, second_snp = second_snp, first_snp
 
     # add correlation column to dataframe
-    plink_info['z_corr'] = z_corr
+    plink_info['z_corr_raw'] = list_of_z_corr[0]
+    plink_info['z_corr_less_2'] = list_of_z_corr[1]
+    plink_info['z_corr_spearman'] = list_of_z_corr[2]
+
 
     factor = 1
     # check if alleles coincide with clickhouse
@@ -125,11 +130,11 @@ def get_query_table():
     return results.input
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     input_path = get_query_table()
     query_table = pd.read_table(input_path, header=None, sep='\t')
     rs_pairs = [data.tolist() for index, data in query_table.iterrows()]
-    list_of_values = [generate_list_for_2_snp(row[0], row[1]) for row in rs_pairs]
-    df = pd.concat(list_of_values)
+    list_of_dfs = [generate_df_for_snp_pair(pair[0], pair[1]) for pair in rs_pairs]
+    df = pd.concat(list_of_dfs)
     df.to_csv('ld_table.csv', sep='\t', index=False)
 
